@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:tx="http://www.springframework.org/schema/tx"
+       xmlns:p="http://www.springframework.org/schema/p"
+       xmlns:aop="http://www.springframework.org/schema/aop"
+       xmlns:integration="http://www.springframework.org/schema/integration"
+       xmlns:context="http://www.springframework.org/schema/context"
+       xmlns:task="http://www.springframework.org/schema/task"
+       xsi:schemaLocation="
+         http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-3.0.xsd
+         http://www.springframework.org/schema/tx http://www.springframework.org/schema/tx/spring-tx-3.0.xsd
+         http://www.springframework.org/schema/aop http://www.springframework.org/schema/aop/spring-aop-3.0.xsd
+         http://www.springframework.org/schema/lang http://www.springframework.org/schema/lang/spring-lang-3.0.xsd
+         http://www.springframework.org/schema/integration http://www.springframework.org/schema/integration/spring-integration-1.0.xsd
+         http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd
+         http://www.springframework.org/schema/task http://www.springframework.org/schema/task/spring-task-3.0.xsd
+        ">
+
+
+
+    <context:property-placeholder ignore-unresolvable="true" location="classpath:/service-client-context.properties"/>
+    <context:property-placeholder ignore-unresolvable="true" location="classpath:/service-context.properties"/>
+    <context:property-placeholder ignore-unresolvable="true" location="bus.properties"/>
+
+    <import resource="musicbrainz-replication.xml"/>
+    <!--
+     todo you have a batch job that downloads updates
+     , and u have the beginnings of a SI messagesource that should consult the db, do the download, and deliver an event
+     which should in turn spin off the batch job 
+    -->
+    <context:component-scan base-package="com.joshlong.jukebox2.musicbrainz.replication"/>
+
+    <task:scheduler id="scheduler" pool-size="10"/>
+    <task:executor id="executor" pool-size="10"/>
+    <task:annotation-driven scheduler="scheduler"/>
+
+
+
+
+    <bean id="replicationDirectory" class="org.springframework.core.io.FileSystemResource">
+        <constructor-arg value="file://#{systemProperties['user.home']}/Desktop/replication"/>
+    </bean>
+
+    <bean id="replicationDownloadDirectory" class="org.springframework.core.io.FileSystemResource">
+        <constructor-arg value="file://#{replicationDirectory.file.absolutePath}/downloads"/>
+    </bean>
+
+    <bean id="replicationUtils" class="com.joshlong.jukebox2.musicbrainz.replication.ReplicationUtils">
+        <constructor-arg value="replicationDirectory"/>
+    </bean>
+
+    <bean class="com.joshlong.jukebox2.musicbrainz.replication.batch.ReplicationProcessor"
+          p:jdbcTemplate-ref="musicbrainzJdbcTemplate"
+          p:replicationUtils-ref="replicationUtils"
+          p:loadPendingJob-ref="loadReplicationDataJob"
+          p:jobLauncher-ref="jobLauncher"
+            />
+
+
+    <bean id="newReplicationUpdateMessageSource"
+          class="com.joshlong.jukebox2.musicbrainz.replication.bus.NewReplicationUpdateMessageSource"
+            p:findNextReplicationSequenceSQL="SELECT current_replication_sequence FROM replication_control"
+            p:replicationBaseUri="${musicbrainz.http.url}"
+            p:jdbcTemplate-ref="musicbrainzJdbcTemplate"
+            p:downloadDirectory-ref="replicationDownloadDirectory"
+    />
+
+    <bean id="inboundReplicationUpdateProcessor"
+          class="com.joshlong.jukebox2.musicbrainz.replication.bus.InboundReplicationUpdateProcessor" />
+
+    <integration:channel id="inboundReplicationUpdates"/>
+    
+    <integration:inbound-channel-adapter ref="newReplicationUpdateMessageSource" channel="inboundReplicationUpdates">
+        <integration:poller max-messages-per-poll="10" >
+            <integration:interval-trigger interval="10000"/>
+        </integration:poller>
+    </integration:inbound-channel-adapter>
+
+    <integration:service-activator input-channel="inboundReplicationUpdates" ref="inboundReplicationUpdateProcessor"/>
+
+</beans>
